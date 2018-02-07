@@ -1,4 +1,4 @@
-#Feb-6
+#Feb-7
 import pandas as pd
 from pandas import Series, DataFrame
 import numpy as np
@@ -247,7 +247,10 @@ def vol(df, file1, file2, file3, max_days):
 
     # append to df
     no_match = []
-    df = df.append(DataFrame(columns=col[4:]))
+    base_col = list(df)
+    append_col = col[4:]
+    df = df.append(DataFrame(columns=append_col))
+    df = df[base_col + append_col]
     for i, RID in enumerate(df.RID):
         frame = vol.loc[vol.RID==RID].reset_index()
         if frame.index.max() >= 0:
@@ -259,16 +262,16 @@ def vol(df, file1, file2, file3, max_days):
         else:
             no_match.append(int(RID))
             pass
-    print('No ROIs within {} days found for {} RIDs: {}'
+    print('No ROIs within {} days found for {} RIDs: {} \n'
         .format(max_days, len(no_match), no_match))        
     df = df[df.ST10CV.notnull()].reset_index(drop=True)
     return df
 
 def zscore(df):
     # separate into diagnostic groups
-    normal = data.loc[data.DX.isin([1,7,9])].reset_index(drop=True)
-    mci = data.loc[data.DX.isin([2,4,8])].reset_index(drop=True)
-    ad = data.loc[data.DX.isin([3,5,6])].reset_index(drop=True)
+    normal = df.loc[df.DX.isin([1,7,9])].reset_index(drop=True)
+    mci = df.loc[df.DX.isin([2,4,8])].reset_index(drop=True)
+    ad = df.loc[df.DX.isin([3,5,6])].reset_index(drop=True)
     print('HC:{}, MCI:{}, AD:{}'.format(len(normal),len(mci),len(ad)))
 
     # z-score
@@ -277,7 +280,6 @@ def zscore(df):
     super_normal = super_normal.iloc[:, ST:]
     mu = super_normal.mean()
     sigma = super_normal.std()
-
 
     #Normals
     zblock=(normal.iloc[:, ST:]-mu)/sigma
@@ -291,18 +293,32 @@ def zscore(df):
     zblock=(ad.iloc[:, ST:]-mu)/sigma
     ad.iloc[:,ST:]=zblock
 
+    normal.name = 'hc'
+    mci.name = 'mci'
+    ad.name = 'ad'
     return normal, mci, ad
 
-def export(df, export=None):
+def rearrange_col(df):
+    l = list(df)
+    col = ['RID', 'DX', 'AV45', 'CDR', 'AGE', 'APOE', 'GEN', 'EDU', 'ADNI_EF', 'ADNI_MEM', 'ADAS', 'MMSCORE']
+    for name in col:
+        idx = l.index(name)
+        l.pop(idx)
+    l.pop(l.index('EXAMDATE'))
+    l.pop(l.index('ST10CV'))
+    col = col + l
+    return df[col]
+
+def split_data(df, export=None):
     neg = df.loc[df.AV45==0].reset_index(drop=True)
-    neg = neg.sample(n=len(neg)).reset_index(drop=True) # shuffle
+    neg = neg.sample(n=len(neg)).reset_index(drop=True)  # shuffle
     pos = df.loc[df.AV45==1].reset_index(drop=True)
-    pos = pos.sample(n=len(pos)).reset_index(drop=True) # shuffle
+    pos = pos.sample(n=len(pos)).reset_index(drop=True)  # shuffle
 
     n = len(df)
     pneg = round(len(neg)/len(df),1)
     ppos = round(len(pos)/len(df),1)
-    print('Total MCI: {}; {}% are AB+, {}% are AB-'.format(n, int(ppos*100), int(pneg*100) ))
+    print('Total: {}; {}% are AB+, {}% are AB-'.format(n, int(ppos*100), int(pneg*100) ))
 
     #how to split
     test = round(n*0.3)
@@ -311,58 +327,88 @@ def export(df, export=None):
     val = n//5
     nvpos = round(val*ppos)
     nvneg = round(val*pneg)
-    train = n-val-test
-    ntrain_pos = len(pos)-ntpos-nvpos
-    ntrain_neg = len(neg)-ntneg-nvneg
+    train = n - val - test
+    ntrain_pos = len(pos) - ntpos - nvpos
+    ntrain_neg = len(neg) - ntneg - nvneg
     assert n == (ntpos + nvpos + ntrain_pos) + (ntneg + nvneg + ntrain_neg)
 
     #split
-    mci_test = pos.iloc[:ntpos,:]
-    mci_test = mci_test.append(neg.iloc[:ntneg,:])
-    assert test == len(mci_test)
-    mci_val = pos.iloc[ntpos:(ntpos+nvpos),:]
-    mci_val = mci_val.append(neg.iloc[ntneg:(ntneg+nvneg),:])
-    assert val == len(mci_val)
-    mci_train = pos.iloc[(ntpos+nvpos):,:]
-    mci_train = mci_train.append(neg.iloc[(ntneg+nvneg):,:])
-    assert train == len(mci_train)
+    dtest = pos.iloc[:ntpos,:]
+    dtest = dtest.append(neg.iloc[:ntneg,:])
+    dval = pos.iloc[ntpos:(ntpos+nvpos),:]
+    dval = dval.append(neg.iloc[ntneg:(ntneg+nvneg),:])
+    dtrain = pos.iloc[(ntpos+nvpos):,:]
+    dtrain = dtrain.append(neg.iloc[(ntneg+nvneg):,:])
+    assert test + val + train == len(dtest) + len(dval) + len(dtrain)
+    
+    if export:
+        export = dtest.sample(n=len(dtest)).reset_index(drop=True) #shuffle
+        export.loc[:,'CDR':].to_csv('../models/{}/test_{}_x.csv'.format(df.name, df.name),index=False,header=False)
+        export.loc[:,'AV45'].to_csv('../models/{}/test_{}_y.csv'.format(df.name, df.name),index=False,header=False)
 
-    # export = mci_test.sample(n=len(mci_test)).reset_index(drop=True) #shuffle
-    # export.loc[:,'DX':].to_csv('../models/no_cerebellum/mci/test_mci_x.csv',index=False,header=False)
-    # export.loc[:,'AV45_LABEL'].to_csv('../models/no_cerebellum/mci/test_mci_y.csv',index=False,header=False)
+        export = dval.sample(n=len(dval)).reset_index(drop=True) #shuffle
+        export.loc[:,'CDR':].to_csv('../models/{}/val_{}_x.csv'.format(df.name, df.name),index=False,header=False)
+        export.loc[:,'AV45'].to_csv('../models/{}/val_{}_y.csv'.format(df.name, df.name),index=False,header=False)
 
-    # export = mci_val.sample(n=len(mci_val)).reset_index(drop=True) #shuffle
-    # export.loc[:,'DX':].to_csv('../models/no_cerebellum/mci/val_mci_x.csv',index=False,header=False)
-    # export.loc[:,'AV45_LABEL'].to_csv('../models/no_cerebellum/mci/val_mci_y.csv',index=False,header=False)
+        export = dtrain.sample(n=len(dtrain)).reset_index(drop=True) #shuffle
+        export.loc[:,'CDR':].to_csv('../models/{}/train_{}_x.csv'.format(df.name, df.name),index=False,header=False)
+        export.loc[:,'AV45'].to_csv('../models/{}/train_{}_y.csv'.format(df.name, df.name),index=False,header=False)
+        
+    return dtest, dval, dtrain
 
-    # export = mci_train.sample(n=len(mci_train)).reset_index(drop=True) #shuffle
-    # export.loc[:,'DX':].to_csv('../models/no_cerebellum/mci/train_mci_x.csv',index=False,header=False)
-    # export.loc[:,'AV45_LABEL'].to_csv('../models/no_cerebellum/mci/train_mci_y.csv',index=False,header=False)
+def mci_3month(df, export=None):
+    # EXPORT 3 Month MCI
+    mci_3month=df.copy(df)
+    mci_3month.insert(2,'EXAMDATE3',NA)
+    ST = ST + 1
+    for i, RID in enumerate(df.RID):
+        frame = vol.loc[vol.RID == RID].reset_index(drop=True)
+        if frame.index.max() >= 0:
+            for j in frame.index:
+                days = days_between(a.EXAMDATE[j], mci.AV45_DATE[i])
+                # needs update
+                if ( 120 > days >= 90) and (mci.EXAMDATE[i] < a.EXAMDATE[j]) and (mci.AV45_DATE[i] < a.EXAMDATE[j]):
+                    mci_3month.loc[i,'EXAMDATE3'] = a.EXAMDATE[j]
+                    mci_3month.loc[i,'ST17SV':] = a.loc[j,'ST17SV':]
+                    break
+        else:
+            print(mci.RID[i], 'not found')
 
-def generate(dx, num):
+    zblock = (mci_3month.iloc[:, ST:]-mu)/sigma
+    mci_3month.iloc[:,ST:]=zblock
+            
+    new = mci_3month[mci_3month.EXAMDATE3.notnull()].reset_index(drop=True)
+    print('{} out of {} matched'.format(len(new),len(mci)))
+
+    if export:
+        export = new.sample(n=len(new)).reset_index(drop=True) #shuffle
+        export.loc[:,'DX':].to_csv('../models/mci/test_mci3_x.csv',index=False,header=False)
+        export.loc[:,'AV45_LABEL'].to_csv('../models/mci/test_mci3_y.csv',index=False,header=False)
+
+def split_for_eval(dx, num, export=None):
     # Generates random training and test sets
     cohort=dx
     dx=eval(dx)
     neg=dx.loc[dx.AV45_LABEL==0].reset_index(drop=True)
-    neg=neg.sample(n=len(neg)).reset_index(drop=True) #shuffle
+    neg=neg.sample(n=len(neg)).reset_index(drop=True)  # shuffle
     pos=dx.loc[dx.AV45_LABEL==1].reset_index(drop=True)
-    pos=pos.sample(n=len(pos)).reset_index(drop=True) #shuffle
+    pos=pos.sample(n=len(pos)).reset_index(drop=True)  # shuffle
     
     n=len(dx)
     pneg=round(len(neg)/len(dx),1);
     ppos=round(len(pos)/len(dx),1);
     print('Total {}: {}; {}% are AB+, {}% are AB-'.format(cohort, n, int(ppos*100), int(pneg*100) ))
     
-    #how to split
-    test=round(n*0.4)
-    ntpos=round(test*ppos)
-    ntneg=round(test*pneg)
-    train=n-test
-    ntrain_pos=len(pos)-ntpos
-    ntrain_neg=len(neg)-ntneg
+    # how to split
+    test = round(n*0.4)
+    ntpos = round(test*ppos)
+    ntneg = round(test*pneg)
+    train = n - test
+    ntrain_pos = len(pos) - ntpos
+    ntrain_neg = len(neg) - ntneg
     assert n == (ntpos + ntrain_pos) + (ntneg + ntrain_neg)
     
-    #split
+    # split
     test_data = pos.iloc[:ntpos,:]
     test_data = test_data.append(neg.iloc[:ntneg,:])
     assert test == len(test_data)
@@ -370,12 +416,13 @@ def generate(dx, num):
     train_data = train_data.append(neg.iloc[ntneg:,:])
     assert train == len(train_data)
     
-    for i in range(num):
-        print('Exporting', i)
-        export1 = test_data.sample(n=len(test_data)).reset_index(drop=True) #shuffle
-        export1.loc[:,'DX':].to_csv('../models/no_cerebellum/{}/test_{}_x{}.csv'.format(cohort, cohort, str(i)),index=False,header=False)
-        export1.loc[:,'AV45_LABEL'].to_csv('../models/no_cerebellum/{}/test_{}_y{}.csv'.format(cohort, cohort, str(i)),index=False,header=False)
+    if export:
+        for i in range(num):
+            print('Exporting', i)
+            export1 = test_data.sample(n=len(test_data)).reset_index(drop=True) #shuffle
+            export1.loc[:,'DX':].to_csv('../models/no_cerebellum/{}/test_{}_x{}.csv'.format(cohort, cohort, str(i)),index=False,header=False)
+            export1.loc[:,'AV45_LABEL'].to_csv('../models/no_cerebellum/{}/test_{}_y{}.csv'.format(cohort, cohort, str(i)),index=False,header=False)
 
-        export2 = train_data.sample(n=len(train_data)).reset_index(drop=True) #shuffle
-        export2.loc[:,'DX':].to_csv('../models/no_cerebellum/{}/train_{}_x{}.csv'.format(cohort, cohort, str(i)),index=False,header=False)
-        export2.loc[:,'AV45_LABEL'].to_csv('../models/no_cerebellum/{}/train_{}_y{}.csv'.format(cohort, cohort, str(i)),index=False,header=False)
+            export2 = train_data.sample(n=len(train_data)).reset_index(drop=True) #shuffle
+            export2.loc[:,'DX':].to_csv('../models/no_cerebellum/{}/train_{}_x{}.csv'.format(cohort, cohort, str(i)),index=False,header=False)
+            export2.loc[:,'AV45_LABEL'].to_csv('../models/no_cerebellum/{}/train_{}_y{}.csv'.format(cohort, cohort, str(i)),index=False,header=False)
