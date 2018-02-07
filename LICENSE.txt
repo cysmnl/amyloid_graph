@@ -1,6 +1,6 @@
 MIT License
 
-Copyright (c) 2016 Michaël Defferrard
+Copyright for portions of project http://github.com/cysmnl/amyloid_graph are held by Michaël Defferrard 2016 as part of project https://github.com/mdeff/cnn_graph. All other copyright for project http://github.com/cysmnl/amyloid_graph are held by Cyrus Manuel 2018.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

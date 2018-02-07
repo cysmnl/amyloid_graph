@@ -239,6 +239,29 @@ def perm_data(x, indices):
             xnew[:,i] = np.zeros(N)
     return xnew
 
+def perm_3data(x, indices):
+    """Permute a 3D data matrix.
+    Exchange node ids so that binary unions form the clustering tree.
+    """
+    if indices is None:
+        return x
+
+    N, M, F = x.shape
+    Mnew = len(indices)
+    assert Mnew >= M
+    xnew = np.empty((N, Mnew, F))
+
+    for i,j in enumerate(indices):
+        # Existing vertex, i.e. real data.
+        if j < M:
+            xnew[:,i,:] = x[:,j,:]
+        # Fake vertex because of singeltons.
+        # They will stay 0 so that max pooling chooses the singelton.
+        # Or -infty ?
+        else:
+            xnew[:,i,:] = np.zeros((N,F))
+    return xnew
+
 def perm_adjacency(A, indices):
     """
     Permute adjacency matrix, i.e. exchange node ids,

@@ -1,331 +1,381 @@
-import gensim
-import sklearn, sklearn.datasets
-import sklearn.naive_bayes, sklearn.linear_model, sklearn.svm, sklearn.neighbors, sklearn.ensemble
-import matplotlib.pyplot as plt
-import scipy.sparse
+#Feb-6
+import pandas as pd
+from pandas import Series, DataFrame
 import numpy as np
-import time, re
+from numpy import nan as NA
+from datetime import datetime
+import os
 
+def days_between(d1, d2):
+    d1 = datetime.strptime(d1, "%Y-%m-%d")
+    d2 = datetime.strptime(d2, "%Y-%m-%d")
+    return abs((d2 - d1).days)
 
-# Helpers to process text documents.
-
-
-class TextDataset(object):
-    def clean_text(self, num='substitute'):
-        # TODO: stemming, lemmatisation
-        for i,doc in enumerate(self.documents):
-            # Digits.
-            if num is 'spell':
-                doc = doc.replace('0', ' zero ')
-                doc = doc.replace('1', ' one ')
-                doc = doc.replace('2', ' two ')
-                doc = doc.replace('3', ' three ')
-                doc = doc.replace('4', ' four ')
-                doc = doc.replace('5', ' five ')
-                doc = doc.replace('6', ' six ')
-                doc = doc.replace('7', ' seven ')
-                doc = doc.replace('8', ' eight ')
-                doc = doc.replace('9', ' nine ')
-            elif num is 'substitute':
-                # All numbers are equal. Useful for embedding (countable words) ?
-                doc = re.sub('(\\d+)', ' NUM ', doc)
-            elif num is 'remove':
-                # Numbers are uninformative (they are all over the place). Useful for bag-of-words ?
-                # But maybe some kind of documents contain more numbers, e.g. finance.
-                # Some documents are indeed full of numbers. At least in 20NEWS.
-                doc = re.sub('[0-9]', ' ', doc)
-            # Remove everything except a-z characters and single space.
-            doc = doc.replace('$', ' dollar ')
-            doc = doc.lower()
-            doc = re.sub('[^a-z]', ' ', doc)
-            doc = ' '.join(doc.split())  # same as doc = re.sub('\s{2,}', ' ', doc)
-            self.documents[i] = doc
-
-    def vectorize(self, **params):
-        # TODO: count or tf-idf. Or in normalize ?
-        vectorizer = sklearn.feature_extraction.text.CountVectorizer(**params)
-        self.data = vectorizer.fit_transform(self.documents)
-        self.vocab = vectorizer.get_feature_names()
-        assert len(self.vocab) == self.data.shape[1]
+def av45(file):
+    """Baseline PET AV-45 positivity estimates (labels)
     
-    def data_info(self, show_classes=False):
-        N, M = self.data.shape
-        sparsity = self.data.nnz / N / M * 100
-        print('N = {} documents, M = {} words, sparsity={:.4f}%'.format(N, M, sparsity))
-        if show_classes:
-            for i in range(len(self.class_names)):
-                num = sum(self.labels == i)
-                print('  {:5d} documents in class {:2d} ({})'.format(num, i, self.class_names[i]))
-        
-    def show_document(self, i):
-        label = self.labels[i]
-        name = self.class_names[label]
-        try:
-            text = self.documents[i]
-            wc = len(text.split())
-        except AttributeError:
-            text = None
-            wc = 'N/A'
-        print('document {}: label {} --> {}, {} words'.format(i, label, name, wc))
-        try:
-            vector = self.data[i,:]
-            for j in range(vector.shape[1]):
-                if vector[0,j] != 0:
-                    print('  {:.2f} "{}" ({})'.format(vector[0,j], self.vocab[j], j))
-        except AttributeError:
-            pass
-        return text
+    Args:
+        file: File location to the csv file.
     
-    def keep_documents(self, idx):
-        """Keep the documents given by the index, discard the others."""
-        self.documents = [self.documents[i] for i in idx]
-        self.labels = self.labels[idx]
-        self.data = self.data[idx,:]
+    Returns:
+        A Pandas dataframe
+    """
+    labels = DataFrame(pd.read_csv(file), columns=['RID','EXAMDATE', 'VISCODE2', 
+        'SUMMARYSUVR_WHOLECEREBNORM_1.11CUTOFF'])
+    print('Unique AV45-PET RIDs: {} \n'.format(len(labels.RID.unique())))
+    labels = labels.loc[labels.VISCODE2=='bl'].reset_index(drop=True)
+    labels = labels.drop(['VISCODE2'], axis=1)
+    labels = labels.rename(columns={'SUMMARYSUVR_WHOLECEREBNORM_1.11CUTOFF':'AV45'})
+    return labels
 
-    def keep_words(self, idx):
-        """Keep the documents given by the index, discard the others."""
-        self.data = self.data[:,idx]
-        self.vocab = [self.vocab[i] for i in idx]
-        try:
-            self.embeddings = self.embeddings[idx,:]
-        except AttributeError:
-            pass
-
-    def remove_short_documents(self, nwords, vocab='selected'):
-        """Remove a document if it contains less than nwords."""
-        if vocab is 'selected':
-            # Word count with selected vocabulary.
-            wc = self.data.sum(axis=1)
-            wc = np.squeeze(np.asarray(wc))
-        elif vocab is 'full':
-            # Word count with full vocabulary.
-            wc = np.empty(len(self.documents), dtype=np.int)
-            for i,doc in enumerate(self.documents):
-                wc[i] = len(doc.split())
-        idx = np.argwhere(wc >= nwords).squeeze()
-        self.keep_documents(idx)
-        return wc
-        
-    def keep_top_words(self, M, Mprint=20):
-        """Keep in the vocaluary the M words who appear most often."""
-        freq = self.data.sum(axis=0)
-        freq = np.squeeze(np.asarray(freq))
-        idx = np.argsort(freq)[::-1]
-        idx = idx[:M]
-        self.keep_words(idx)
-        print('most frequent words')
-        for i in range(Mprint):
-            print('  {:3d}: {:10s} {:6d} counts'.format(i, self.vocab[i], freq[idx][i]))
-        return freq[idx]
+def dx(df, file, max_days):
+    """Append baseline diagnosis
     
-    def normalize(self, norm='l1'):
-        """Normalize data to unit length."""
-        # TODO: TF-IDF.
-        data = self.data.astype(np.float64)
-        self.data = sklearn.preprocessing.normalize(data, axis=1, norm=norm)
-        
-    def embed(self, filename=None, size=100):
-        """Embed the vocabulary using pre-trained vectors."""
-        if filename:
-            model = gensim.models.Word2Vec.load_word2vec_format(filename, binary=True)
-            size = model.vector_size
+    Args:
+        df: Pandas dataframe of the AV45-PET subjects
+        file: File location to the csv file.
+        max_days: Maximum days from AV45-PET examdate
+    
+    Returns:
+        A Pandas dataframe
+    """
+    df = df.append(DataFrame(columns=['DX']))    
+    dx = DataFrame(pd.read_csv(file), 
+        columns=['RID','EXAMDATE','DXCHANGE', 'DXCURREN', 'DXCONV'])
+    nodx = []
+    for i, RID in enumerate(df.RID):
+        if RID > 5296:  # no ADNI3
+            break
+        petdate = df.EXAMDATE[i]
+        frame = dx.loc[dx.RID==RID].sort_values(by='EXAMDATE').reset_index(drop=True)
+        if frame.index.max() >= 0:
+            for j, date in enumerate(frame.EXAMDATE):
+                days = days_between(petdate, date)
+                if days <= max_days:
+                    if frame.DXCHANGE.notnull()[j] == True:
+                        df.loc[i,'DX'] = frame.DXCHANGE[j]
+                        break
+                    elif frame.DXCURREN.notnutll()[j] == True:
+                        df.loc[i,'DX'] = frame.DXCURREN[j]
+                        break
+                elif j == frame.index.max():
+                    nodx.append(int(RID))
         else:
-            class Sentences(object):
-                def __init__(self, documents):
-                    self.documents = documents
-                def __iter__(self):
-                    for document in self.documents:
-                        yield document.split()
-            model = gensim.models.Word2Vec(Sentences(self.documents), size)
-        self.embeddings = np.empty((len(self.vocab), size))
-        keep = []
-        not_found = 0
-        for i,word in enumerate(self.vocab):
-            try:
-                self.embeddings[i,:] = model[word]
-                keep.append(i)
-            except KeyError:
-                not_found += 1
-        print('{} words not found in corpus'.format(not_found, i))
-        self.keep_words(keep)
+            print('DX info for RID {} not found \n'.format(int(RID)))
+    df = df[df.DX.notnull()].reset_index(drop=True)
+    print('No DX within {} days found for {} RIDs: {} \n'.format(max_days,len(nodx),nodx))
+    hc = df.loc[df.DX.isin([1,7,9])]
+    mci = df.loc[df.DX.isin([2,4,8])]
+    ad = df.loc[df.DX.isin([3,5,6])]
+    print('Healthy:{}, MCI:{}, AD:{} \n'.format(len(hc),len(mci),len(ad)))
+    return df
 
-class Text20News(TextDataset):
-    def __init__(self, **params):
-        dataset = sklearn.datasets.fetch_20newsgroups(**params)
-        self.documents = dataset.data
-        self.labels = dataset.target
-        self.class_names = dataset.target_names
-        assert max(self.labels) + 1 == len(self.class_names)
-        N, C = len(self.documents), len(self.class_names)
-        print('N = {} documents, C = {} classes'.format(N, C))
+def adas(df, file, max_days):
+    df = df.append(DataFrame(columns=['ADAS']))
+    adas = DataFrame(pd.read_csv(file), columns=['RID','USERDATE','TOTAL13'])
+    noadas = []
+    for i, RID in enumerate(df.RID):
+        petdate = df.EXAMDATE[i]
+        frame = adas.loc[adas.RID==RID].sort_values(by='USERDATE').reset_index(drop=True)
+        if frame.index.max() >= 0:
+            for j in frame.index:
+                if frame.USERDATE.isnull()[j] == True:
+                    print('error: no USERDATE for {}'.format(RID))
+                    break
+                else:
+                    days = days_between(petdate, frame.USERDATE[j])
+                    if days <= max_days:
+                        df.loc[i,'ADAS'] = frame.TOTAL13[j]
+                        break
+                    elif j == frame.index.max():
+                        noadas.append(int(RID))
+        else:
+            print('ADAS info for RID {} not found \n'.format(int(RID)))
+    print('No ADAS within {} days found for {} RIDs: {} \n'.format(max_days,len(noadas),noadas))
+    df = df[df.ADAS.notnull()].reset_index(drop=True)
+    return df
 
-class TextRCV1(TextDataset):
-    def __init__(self, **params):
-        dataset = sklearn.datasets.fetch_rcv1(**params)
-        self.data = dataset.data
-        self.target = dataset.target
-        self.class_names = dataset.target_names
-        assert len(self.class_names) == 103  # 103 categories according to LYRL2004
-        N, C = self.target.shape
-        assert C == len(self.class_names)
-        print('N = {} documents, C = {} classes'.format(N, C))
+def cdr(df, file, max_days):
+    df = df.append(DataFrame(columns=['CDR']))
+    cdr = DataFrame(pd.read_csv(file), columns=['RID','EXAMDATE','USERDATE','USERDATE2','CDGLOBAL'])
+    over_maxdays = []
+    for i, RID in enumerate(df.RID):
+        petdate = df.EXAMDATE[i]
+        frame = cdr.loc[cdr.RID==RID].sort_values(by=['EXAMDATE','USERDATE','USERDATE2']).reset_index(drop=True)
+        if frame.index.max() >= 0:
+            for j in frame.index:
+                if frame.EXAMDATE.notnull()[j] == True:
+                    date = frame.EXAMDATE[j]
+                elif frame.USERDATE.notnull()[j] == True:
+                    date = frame.USERDATE[j]
+                elif frame.USERDATE2.notnull()[j] == True:
+                    date = frame.USERDATE2[j]
+                days = days_between(petdate, date)
+                if days <= max_days:
+                    df.loc[i,'CDR'] = frame.CDGLOBAL[j]
+                    break
+                elif j == frame.index.max():
+                    over_maxdays.append(int(RID))
+        else:
+            print('CDR info for RID {} not found \n'.format(int(RID)))
+    print('No CDR within {} days found for {} RIDs: {} \n'.format(max_days,len(over_maxdays),over_maxdays))
+    df = df[df.CDR.notnull()].reset_index(drop=True)
+    return df
 
-    def remove_classes(self, keep):
-        ## Construct a lookup table for labels.
-        labels_row = []
-        labels_col = []
-        class_lookup = {}
-        for i,name in enumerate(self.class_names):
-            class_lookup[name] = i
-        self.class_names = keep
+def mmse(df, file, max_days):
+    df = df.append(DataFrame(columns=['MMSCORE']))
+    mmse = DataFrame(pd.read_csv(file, low_memory=False), columns=['RID','EXAMDATE','USERDATE','USERDATE2','MMSCORE'])
+    over_maxdays = []
+    for i, RID in enumerate(df.RID):
+        petdate = df.EXAMDATE[i]
+        frame = mmse.loc[mmse.RID==RID].sort_values(by=['EXAMDATE','USERDATE','USERDATE2']).reset_index(drop=True)
+        if frame.index.max() >= 0:
+            for j in frame.index:
+                if frame.EXAMDATE.notnull()[j] == True:
+                    date = frame.EXAMDATE[j]
+                elif frame.USERDATE.notnull()[j] == True:
+                    date = frame.USERDATE[j]
+                elif frame.USERDATE2.notnull()[j] == True:
+                    date = frame.USERDATE2[j]
+                days = days_between(petdate, date)
+                if days <= max_days:
+                    df.loc[i,'MMSCORE'] = frame.MMSCORE[j]
+                    break
+                elif j == frame.index.max():
+                    over_maxdays.append(int(RID))
+        else:
+            print('MMSE info for RID {} not found \n'.format(int(RID)))
+    print('No MMSE within {} days found for {} RIDs: {} \n'.format(max_days,len(over_maxdays),over_maxdays))
+    df = df[df.MMSCORE.notnull()].reset_index(drop=True)
+    return df
 
-        # Index of classes to keep.
-        idx_keep = np.empty(len(keep))
-        for i,cat in enumerate(keep):
-            idx_keep[i] = class_lookup[cat]
-        self.target = self.target[:,idx_keep]
-        assert self.target.shape[1] == len(keep)
+def mem(df, file, max_days):
+    df = df.append(DataFrame(columns=['ADNI_EF']))
+    df = df.append(DataFrame(columns=['ADNI_MEM']))
+    mem = DataFrame(pd.read_csv(file, low_memory=False), columns=['RID','EXAMDATE','USERDATE','USERDATE2','ADNI_EF','ADNI_MEM'])
+    over_maxdays = []
+    for i, RID in enumerate(df.RID):
+        petdate = df.EXAMDATE[i]
+        frame = mem.loc[mem.RID==RID].sort_values(by=['EXAMDATE','USERDATE','USERDATE2']).reset_index(drop=True)
+        if frame.index.max() >= 0:
+            for j in frame.index:
+                if frame.EXAMDATE.notnull()[j] == True:
+                    date = frame.EXAMDATE[j]
+                elif frame.USERDATE.notnull()[j] == True:
+                    date = frame.USERDATE[j]
+                elif frame.USERDATE2.notnull()[j] == True:
+                    date = frame.USERDATE2[j]
+                days = days_between(petdate, date)
+                if days <= max_days:
+                    df.loc[i,'ADNI_EF'] = frame.ADNI_EF[j]
+                    df.loc[i,'ADNI_MEM'] = frame.ADNI_MEM[j]
+                    break
+                elif j == frame.index.max():
+                    over_maxdays.append(int(RID))
+        else:
+            print('MEM & EF info for RID {} not found \n'.format(int(RID)))
+    print('No MEM & EF within {} days found for {} RIDs: {} \n'.format(max_days,len(over_maxdays),over_maxdays))
+    df = df[df.ADNI_EF.notnull()].reset_index(drop=True)
+    df = df[df.ADNI_MEM.notnull()].reset_index(drop=True)
+    return df
 
-    def show_doc_per_class(self, print_=False):
-        """Number of documents per class."""
-        docs_per_class = np.array(self.target.astype(np.uint64).sum(axis=0)).squeeze()
-        print('categories ({} assignments in total)'.format(docs_per_class.sum()))
-        if print_:
-            for i,cat in enumerate(self.class_names):
-                print('  {:5s}: {:6d} documents'.format(cat, docs_per_class[i]))
-        plt.figure(figsize=(17,5))
-        plt.plot(sorted(docs_per_class[::-1]),'.')
+def demo(df, file):
+    df = df.append(DataFrame(columns=['AGE']))
+    df = df.append(DataFrame(columns=['GEN']))
+    df = df.append(DataFrame(columns=['EDU']))
+    demo = DataFrame(pd.read_csv(file, low_memory=False), columns=['RID', 'PTGENDER','PTDOBMM','PTDOBYY','PTEDUCAT'])
+    for i, RID in enumerate(df.RID):
+        petdate = df.EXAMDATE[i]
+        frame = demo.loc[demo.RID==RID].reset_index(drop=True)
+        if frame.index.max() >= 0:        
+            df.loc[i,'AGE'] = int(df.EXAMDATE[i][0:4]) - frame.PTDOBYY[0]
+            df.loc[i,'GEN'] = frame.PTGENDER[0]
+            df.loc[i,'EDU'] = frame.PTEDUCAT[0]
+        else:
+            print('Demographic info for RID {} not found \n'.format(int(RID)))
+    df = df[df.AGE.notnull()].reset_index(drop=True)
+    df = df[df.GEN.notnull()].reset_index(drop=True)
+    df = df[df.EDU.notnull()].reset_index(drop=True)
+    return df
 
-    def show_classes_per_doc(self):
-        """Number of classes per document."""
-        classes_per_doc = np.array(self.target.sum(axis=1)).squeeze()
-        plt.figure(figsize=(17,5))
-        plt.plot(sorted(classes_per_doc[::-1]),'.')
+def apoe(df, file):
+    df = df.append(DataFrame(columns=['APOE']))
+    apoe = DataFrame(pd.read_csv(file, low_memory=False), columns=['RID', 'APGEN1', 'APGEN2'])
+    no_match = []
+    for i, RID in enumerate(df.RID):
+        petdate = df.EXAMDATE[i]
+        frame = apoe.loc[apoe.RID==RID].reset_index(drop=True)
+        if frame.index.max() >= 0: 
+            df.loc[i,'APOE'] = 0
+            if frame.APGEN1[0] == 4:
+                df.loc[i,'APOE'] += 1
+            if frame.APGEN2[0] == 4:
+                df.loc[i,'APOE'] += 1            
+        else:
+            no_match.append(int(RID))
+    print('Genetic info for {} RIDs not found: {} \n'
+        .format(len(no_match),no_match))
+    df = df[df.APOE.notnull()].reset_index(drop=True)
+    return df
 
-    def select_documents(self):
-        classes_per_doc = np.array(self.target.sum(axis=1)).squeeze()
-        self.target = self.target[classes_per_doc==1]
-        self.data = self.data[classes_per_doc==1, :]
+def vol(df, file1, file2, file3, max_days):
+    # use roi region names to find the corresponding field names
+    col = ['RID','EXAMDATE','IMAGETYPE','OVERALLQC','ST10CV']
+    roi = DataFrame(pd.read_csv(file1), columns=['region'])
+    name = DataFrame(pd.read_csv(file2), columns=['FLDNAME','TEXT'])
 
-        # Convert labels from indicator form to single value.
-        N, C = self.target.shape
-        target = self.target.tocoo()
-        self.labels = target.col
-        assert self.labels.min() == 0
-        assert self.labels.max() == C - 1
+    # append field names as column names
+    a = name.TEXT.str.contains("Volume")
+    for i in roi.index:
+        # print(roi.region[i])
+        b = name.TEXT.str.contains(roi.region[i])
+        for j in name.index:
+            # print(vol.FLDNAME[j])
+            if (a[j] == True and b[j] == True):
+                col.append(name.FLDNAME[j])
+    vol = DataFrame(pd.read_csv(file3),columns=col)
+    
+    # keep QC Pass and Non-Accelerated
+    vol = vol.loc[vol.OVERALLQC == 'Pass'].loc[vol.IMAGETYPE == 'Non-Accelerated T1'].reset_index(drop=True)
 
-        # Bruna and Dropout used 2 * 201369 = 402738 documents. Probably the difference btw v1 and v2.
-        #return classes_per_doc
+    # normalize to ICV Cortical Volume, multiply by 10000
+    num_col_labels = len(vol.iloc[0,:])
+    for i in range(num_col_labels):
+        if i >= (num_col_labels-86):
+            vol.iloc[:,i] = (vol.iloc[:,i] / vol.loc[:,'ST10CV']) * 10000
+    vol = vol.round(decimals=2)
 
-### Helpers to quantify classifier's quality.
+    # append to df
+    no_match = []
+    df = df.append(DataFrame(columns=col[4:]))
+    for i, RID in enumerate(df.RID):
+        frame = vol.loc[vol.RID==RID].reset_index()
+        if frame.index.max() >= 0:
+            for j in frame.index:
+                days = days_between(frame.EXAMDATE[j], df.EXAMDATE[i])
+                if days <= max_days:
+                    df.loc[i,'ST10CV':] = frame.loc[j,'ST10CV':]
+                    break
+        else:
+            no_match.append(int(RID))
+            pass
+    print('No ROIs within {} days found for {} RIDs: {}'
+        .format(max_days, len(no_match), no_match))        
+    df = df[df.ST10CV.notnull()].reset_index(drop=True)
+    return df
 
+def zscore(df):
+    # separate into diagnostic groups
+    normal = data.loc[data.DX.isin([1,7,9])].reset_index(drop=True)
+    mci = data.loc[data.DX.isin([2,4,8])].reset_index(drop=True)
+    ad = data.loc[data.DX.isin([3,5,6])].reset_index(drop=True)
+    print('HC:{}, MCI:{}, AD:{}'.format(len(normal),len(mci),len(ad)))
 
-def baseline(train_data, train_labels, test_data, test_labels, omit=[]):
-    """Train various classifiers to get a baseline."""
-    clf, train_accuracy, test_accuracy, train_f1, test_f1, exec_time = [], [], [], [], [], []
-    clf.append(sklearn.neighbors.KNeighborsClassifier(n_neighbors=10))
-    clf.append(sklearn.linear_model.LogisticRegression())
-    clf.append(sklearn.naive_bayes.BernoulliNB(alpha=.01))
-    clf.append(sklearn.ensemble.RandomForestClassifier())
-    clf.append(sklearn.naive_bayes.MultinomialNB(alpha=.01))
-    clf.append(sklearn.linear_model.RidgeClassifier())
-    clf.append(sklearn.svm.LinearSVC())
-    for i,c in enumerate(clf):
-        if i not in omit:
-            t_start = time.process_time()
-            c.fit(train_data, train_labels)
-            train_pred = c.predict(train_data)
-            test_pred = c.predict(test_data)
-            train_accuracy.append('{:5.2f}'.format(100*sklearn.metrics.accuracy_score(train_labels, train_pred)))
-            test_accuracy.append('{:5.2f}'.format(100*sklearn.metrics.accuracy_score(test_labels, test_pred)))
-            train_f1.append('{:5.2f}'.format(100*sklearn.metrics.f1_score(train_labels, train_pred, average='weighted')))
-            test_f1.append('{:5.2f}'.format(100*sklearn.metrics.f1_score(test_labels, test_pred, average='weighted')))
-            exec_time.append('{:5.2f}'.format(time.process_time() - t_start))
-    print('Train accuracy:      {}'.format(' '.join(train_accuracy)))
-    print('Test accuracy:       {}'.format(' '.join(test_accuracy)))
-    print('Train F1 (weighted): {}'.format(' '.join(train_f1)))
-    print('Test F1 (weighted):  {}'.format(' '.join(test_f1)))
-    print('Execution time:      {}'.format(' '.join(exec_time)))
-
-def grid_search(params, grid_params, train_data, train_labels, val_data,
-        val_labels, test_data, test_labels, model):
-    """Explore the hyper-parameter space with an exhaustive grid search."""
-    params = params.copy()
-    train_accuracy, test_accuracy, train_f1, test_f1 = [], [], [], []
-    grid = sklearn.grid_search.ParameterGrid(grid_params)
-    print('grid search: {} combinations to evaluate'.format(len(grid)))
-    for grid_params in grid:
-        params.update(grid_params)
-        name = '{}'.format(grid)
-        print('\n\n  {}  \n\n'.format(grid_params))
-        m = model(params)
-        m.fit(train_data, train_labels, val_data, val_labels)
-        string, accuracy, f1, loss = m.evaluate(train_data, train_labels)
-        train_accuracy.append('{:5.2f}'.format(accuracy)); train_f1.append('{:5.2f}'.format(f1))
-        print('train {}'.format(string))
-        string, accuracy, f1, loss = m.evaluate(test_data, test_labels)
-        test_accuracy.append('{:5.2f}'.format(accuracy)); test_f1.append('{:5.2f}'.format(f1))
-        print('test  {}'.format(string))
-    print('\n\n')
-    print('Train accuracy:      {}'.format(' '.join(train_accuracy)))
-    print('Test accuracy:       {}'.format(' '.join(test_accuracy)))
-    print('Train F1 (weighted): {}'.format(' '.join(train_f1)))
-    print('Test F1 (weighted):  {}'.format(' '.join(test_f1)))
-    for i,grid_params in enumerate(grid):
-        print('{} --> {} {} {} {}'.format(grid_params, train_accuracy[i], test_accuracy[i], train_f1[i], test_f1[i]))
+    # z-score
+    super_normal = normal.loc[normal.APOE==0].loc[normal.AV45==0]
+    ST = len(super_normal.iloc[0,:]) - 86
+    super_normal = super_normal.iloc[:, ST:]
+    mu = super_normal.mean()
+    sigma = super_normal.std()
 
 
-class model_perf(object):
+    #Normals
+    zblock=(normal.iloc[:, ST:]-mu)/sigma
+    normal.iloc[:,ST:]=zblock
 
-    def __init__(s):
-        s.names, s.params = set(), {}
-        s.fit_accuracies, s.fit_losses, s.fit_time = {}, {}, {}
-        s.train_accuracy, s.train_f1, s.train_loss = {}, {}, {}
-        s.test_accuracy, s.test_f1, s.test_loss = {}, {}, {}
+    #MCI
+    zblock=(mci.iloc[:, ST:]-mu)/sigma
+    mci.iloc[:,ST:]=zblock
 
-    def test(s, model, name, params, train_data, train_labels, val_data, val_labels, test_data, test_labels):
-        s.params[name] = params
-        s.fit_accuracies[name], s.fit_losses[name], s.fit_time[name] = \
-                model.fit(train_data, train_labels, val_data, val_labels)
-        string, s.train_accuracy[name], s.train_f1[name], s.train_loss[name] = \
-                model.evaluate(train_data, train_labels)
-        print('train {}'.format(string))
-        string, s.test_accuracy[name], s.test_f1[name], s.test_loss[name] = \
-                model.evaluate(test_data, test_labels)
-        print('test  {}'.format(string))
-        s.names.add(name)
+    #AD
+    zblock=(ad.iloc[:, ST:]-mu)/sigma
+    ad.iloc[:,ST:]=zblock
 
-    def show(s, fontsize=None):
-        if fontsize:
-            plt.rc('pdf', fonttype=42)
-            plt.rc('ps', fonttype=42)
-            plt.rc('font', size=fontsize)         # controls default text sizes
-            plt.rc('axes', titlesize=fontsize)    # fontsize of the axes title
-            plt.rc('axes', labelsize=fontsize)    # fontsize of the x any y labels
-            plt.rc('xtick', labelsize=fontsize)   # fontsize of the tick labels
-            plt.rc('ytick', labelsize=fontsize)   # fontsize of the tick labels
-            plt.rc('legend', fontsize=fontsize)   # legend fontsize
-            plt.rc('figure', titlesize=fontsize)  # size of the figure title
-        print('  accuracy        F1             loss        time [ms]  name')
-        print('test  train   test  train   test     train')
-        for name in sorted(s.names):
-            print('{:5.2f} {:5.2f}   {:5.2f} {:5.2f}   {:.2e} {:.2e}   {:3.0f}   {}'.format(
-                    s.test_accuracy[name], s.train_accuracy[name],
-                    s.test_f1[name], s.train_f1[name],
-                    s.test_loss[name], s.train_loss[name], s.fit_time[name]*1000, name))
+    return normal, mci, ad
 
-        fig, ax = plt.subplots(1, 2, figsize=(15, 5))
-        for name in sorted(s.names):
-            steps = np.arange(len(s.fit_accuracies[name])) + 1
-            steps *= s.params[name]['eval_frequency']
-            ax[0].plot(steps, s.fit_accuracies[name], '.-', label=name)
-            ax[1].plot(steps, s.fit_losses[name], '.-', label=name)
-        ax[0].set_xlim(min(steps), max(steps))
-        ax[1].set_xlim(min(steps), max(steps))
-        ax[0].set_xlabel('step')
-        ax[1].set_xlabel('step')
-        ax[0].set_ylabel('validation accuracy')
-        ax[1].set_ylabel('training loss')
-        ax[0].legend(loc='lower right')
-        ax[1].legend(loc='upper right')
-        #fig.savefig('training.pdf')
+def export(df, export=None):
+    neg = df.loc[df.AV45==0].reset_index(drop=True)
+    neg = neg.sample(n=len(neg)).reset_index(drop=True) # shuffle
+    pos = df.loc[df.AV45==1].reset_index(drop=True)
+    pos = pos.sample(n=len(pos)).reset_index(drop=True) # shuffle
+
+    n = len(df)
+    pneg = round(len(neg)/len(df),1)
+    ppos = round(len(pos)/len(df),1)
+    print('Total MCI: {}; {}% are AB+, {}% are AB-'.format(n, int(ppos*100), int(pneg*100) ))
+
+    #how to split
+    test = round(n*0.3)
+    ntpos = round(test*ppos)
+    ntneg = round(test*pneg)
+    val = n//5
+    nvpos = round(val*ppos)
+    nvneg = round(val*pneg)
+    train = n-val-test
+    ntrain_pos = len(pos)-ntpos-nvpos
+    ntrain_neg = len(neg)-ntneg-nvneg
+    assert n == (ntpos + nvpos + ntrain_pos) + (ntneg + nvneg + ntrain_neg)
+
+    #split
+    mci_test = pos.iloc[:ntpos,:]
+    mci_test = mci_test.append(neg.iloc[:ntneg,:])
+    assert test == len(mci_test)
+    mci_val = pos.iloc[ntpos:(ntpos+nvpos),:]
+    mci_val = mci_val.append(neg.iloc[ntneg:(ntneg+nvneg),:])
+    assert val == len(mci_val)
+    mci_train = pos.iloc[(ntpos+nvpos):,:]
+    mci_train = mci_train.append(neg.iloc[(ntneg+nvneg):,:])
+    assert train == len(mci_train)
+
+    # export = mci_test.sample(n=len(mci_test)).reset_index(drop=True) #shuffle
+    # export.loc[:,'DX':].to_csv('../models/no_cerebellum/mci/test_mci_x.csv',index=False,header=False)
+    # export.loc[:,'AV45_LABEL'].to_csv('../models/no_cerebellum/mci/test_mci_y.csv',index=False,header=False)
+
+    # export = mci_val.sample(n=len(mci_val)).reset_index(drop=True) #shuffle
+    # export.loc[:,'DX':].to_csv('../models/no_cerebellum/mci/val_mci_x.csv',index=False,header=False)
+    # export.loc[:,'AV45_LABEL'].to_csv('../models/no_cerebellum/mci/val_mci_y.csv',index=False,header=False)
+
+    # export = mci_train.sample(n=len(mci_train)).reset_index(drop=True) #shuffle
+    # export.loc[:,'DX':].to_csv('../models/no_cerebellum/mci/train_mci_x.csv',index=False,header=False)
+    # export.loc[:,'AV45_LABEL'].to_csv('../models/no_cerebellum/mci/train_mci_y.csv',index=False,header=False)
+
+def generate(dx, num):
+    # Generates random training and test sets
+    cohort=dx
+    dx=eval(dx)
+    neg=dx.loc[dx.AV45_LABEL==0].reset_index(drop=True)
+    neg=neg.sample(n=len(neg)).reset_index(drop=True) #shuffle
+    pos=dx.loc[dx.AV45_LABEL==1].reset_index(drop=True)
+    pos=pos.sample(n=len(pos)).reset_index(drop=True) #shuffle
+    
+    n=len(dx)
+    pneg=round(len(neg)/len(dx),1);
+    ppos=round(len(pos)/len(dx),1);
+    print('Total {}: {}; {}% are AB+, {}% are AB-'.format(cohort, n, int(ppos*100), int(pneg*100) ))
+    
+    #how to split
+    test=round(n*0.4)
+    ntpos=round(test*ppos)
+    ntneg=round(test*pneg)
+    train=n-test
+    ntrain_pos=len(pos)-ntpos
+    ntrain_neg=len(neg)-ntneg
+    assert n == (ntpos + ntrain_pos) + (ntneg + ntrain_neg)
+    
+    #split
+    test_data = pos.iloc[:ntpos,:]
+    test_data = test_data.append(neg.iloc[:ntneg,:])
+    assert test == len(test_data)
+    train_data = pos.iloc[ntpos:,:]
+    train_data = train_data.append(neg.iloc[ntneg:,:])
+    assert train == len(train_data)
+    
+    for i in range(num):
+        print('Exporting', i)
+        export1 = test_data.sample(n=len(test_data)).reset_index(drop=True) #shuffle
+        export1.loc[:,'DX':].to_csv('../models/no_cerebellum/{}/test_{}_x{}.csv'.format(cohort, cohort, str(i)),index=False,header=False)
+        export1.loc[:,'AV45_LABEL'].to_csv('../models/no_cerebellum/{}/test_{}_y{}.csv'.format(cohort, cohort, str(i)),index=False,header=False)
+
+        export2 = train_data.sample(n=len(train_data)).reset_index(drop=True) #shuffle
+        export2.loc[:,'DX':].to_csv('../models/no_cerebellum/{}/train_{}_x{}.csv'.format(cohort, cohort, str(i)),index=False,header=False)
+        export2.loc[:,'AV45_LABEL'].to_csv('../models/no_cerebellum/{}/train_{}_y{}.csv'.format(cohort, cohort, str(i)),index=False,header=False)

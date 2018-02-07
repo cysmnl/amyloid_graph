@@ -13,3 +13,5 @@ summaries/
 
 # Model parameters
 checkpoints/
+
+*.DS_Store
