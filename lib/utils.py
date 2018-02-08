@@ -426,3 +426,18 @@ def split_for_eval(dx, num, export=None):
             export2 = train_data.sample(n=len(train_data)).reset_index(drop=True) #shuffle
             export2.loc[:,'DX':].to_csv('../models/no_cerebellum/{}/train_{}_x{}.csv'.format(cohort, cohort, str(i)),index=False,header=False)
             export2.loc[:,'AV45_LABEL'].to_csv('../models/no_cerebellum/{}/train_{}_y{}.csv'.format(cohort, cohort, str(i)),index=False,header=False)
+
+def expand(x, covars):
+    """Takes the input array and makes it into a 3D array
+    The covariates are replicated d times and have their own dimension
+
+    """
+    d = x.shape[1] - covars
+    f = covars + 1
+    new = np.zeros((len(x), d, f), dtype = np.float64)
+    for i in range(covars+1):
+        if i == 0:
+            new[:,:,0] = x[:,covars:]  # atrophy data
+        else:
+            new[:,:,i] = np.array([x[:,(i-1)].tolist(),]*d).transpose()  # covariates
+    return new
